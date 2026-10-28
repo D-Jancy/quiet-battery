@@ -19,6 +19,14 @@ fn identify(c: &Collection) -> Option<Profile> {
     if vid != 0x1532 {
         return None;
     }
+    if pid == 0x009c {
+        return Some(Profile {
+            name: "Razer DeathAdder V2 X HyperSpeed",
+            vid,
+            pid,
+            wireless: true,
+        });
+    }
     MODELS.iter().find_map(|&(name, receiver, cable)| {
         (pid == receiver || pid == cable).then_some(Profile {
             name,
@@ -35,6 +43,8 @@ fn accepts(c: &Collection) -> bool {
 }
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "razer",
+    kind: super::DeviceKind::Mouse,
+    unconfirmed_name: None,
     identify,
     accepts,
     feature_only: true,
@@ -54,7 +64,9 @@ fn request(command: u8) -> [u8; 91] {
     b
 }
 fn parse(b: &[u8], command: u8) -> Result<Option<u8>, DeviceError> {
-    if b.len() != 91 || b[0] != 0 {
+    // Windows may omit only the final reserved byte for this unnumbered
+    // report. Both lengths still include the zero report-ID and the full CRC.
+    if !matches!(b.len(), 90 | 91) || b[0] != 0 {
         return Err(DeviceError::Protocol(
             "Razer Feature长度或report-ID异常".into(),
         ));
@@ -93,12 +105,17 @@ fn command(io: &dyn Transport, id: u8, cancel: &Cancellation) -> Result<u8, Devi
 }
 fn query(p: Profile, io: &dyn Transport, cancel: &Cancellation) -> Result<Reading, DeviceError> {
     let raw = command(io, 0x80, cancel)?;
-    let power = match command(io, 0x84, cancel) {
-        Ok(0) => PowerState::Discharging,
-        Ok(1) => PowerState::Charging,
-        Ok(n) => PowerState::Unknown(n),
-        Err(DeviceError::Cancelled) => return Err(DeviceError::Cancelled),
-        Err(_) => PowerState::Unknown(255), // basic battery remains useful
+    // 009C uses a replaceable AA/AAA cell; no charging command is needed.
+    let power = if p.pid == 0x009c {
+        PowerState::Discharging
+    } else {
+        match command(io, 0x84, cancel) {
+            Ok(0) => PowerState::Discharging,
+            Ok(1) => PowerState::Charging,
+            Ok(n) => PowerState::Unknown(n),
+            Err(DeviceError::Cancelled) => return Err(DeviceError::Cancelled),
+            Err(_) => PowerState::Unknown(255), // basic battery remains useful
+        }
     };
     let percent = ((u16::from(raw) * 100 + 127) / 255) as u8;
     Reading::from_percent(p.name.into(), percent, power)
@@ -157,7 +174,7 @@ mod tests {
             assert_eq!(parse(&reply(0x80, raw, 2), 0x80).unwrap(), Some(raw));
         }
         let b = reply(0x80, 171, 2);
-        for len in 0..91 {
+        for len in 0..90 {
             assert!(parse(&b[..len], 0x80).is_err());
         }
         for index in [6, 9, 10, 40, 89] {
@@ -226,6 +243,30 @@ mod tests {
             Err(DeviceError::Cancelled)
         ));
         io.done();
+    }
+    #[test]
+    fn deathadder_v2x_is_receiver_only_and_accepts_short_windows_feature() {
+        let p = identify(&collection(0x1532, 0x009c, "fixture")).unwrap();
+        assert!(p.wireless);
+        assert_eq!(p.name, "Razer DeathAdder V2 X HyperSpeed");
+        let mut short = reply(0x80, 26, 2);
+        short.pop();
+        let io = Script::new(vec![
+            Step::Set(request(0x80).to_vec()),
+            Step::Pause,
+            Step::Get(short.clone()),
+        ]);
+        let r = query(p, &io, &Cancellation::default()).unwrap();
+        io.done();
+        assert_eq!(
+            (r.normalized_percent(), r.power_state),
+            (10, PowerState::Discharging)
+        );
+        short[0] = 1;
+        assert!(parse(&short, 0x80).is_err());
+        short[0] = 0;
+        short[89] ^= 1;
+        assert!(parse(&short, 0x80).is_err());
     }
     #[test]
     fn endless_foreign_stream_is_bounded_and_cannot_become_success() {

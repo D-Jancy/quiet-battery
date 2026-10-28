@@ -16,7 +16,8 @@
 - `src/device/mod.rs`：`DeviceKind`、`DeviceDescriptor`、`Candidate`、`Reading`、`BatterySource`、`DeviceError` 与 `Registry`。
 - `src/device/logitech.rs`：现有 HID++ 家族适配器、查询白名单、回复匹配、连接边界和解析测试。
 - `src/device/compx.rs` / `razer.rs`：本次新增协议与静态profile，先看[设备支持表](DEVICE-SUPPORT.md)的精确ID、控制集合和固定来源版本。同协议新型号通常补MODELS条目；不同接口、report长度、事务ID或充电字段须补规则与测试，不只加名称。
-- `src/device/vendor_hid.rs`：共用原生事务桥与发现，两个模块直接复用；`Transport`可用模拟脚本测试完整查询。
+- `src/device/vendor_hid.rs`：共用原生事务桥与发现，两个模块直接复用；`Transport`可用模拟脚本测试完整查询；Adapter.kind决定通用设备类型，只有鼠标默认选中；共享OEM身份未确认时填写unconfirmed_name，不提前显示零售品牌/型号。
+- `src/device/rog_pelta.rs` / `razer_headset.rs` / `aula.rs`：新厂商报文也复用vendor_hid；通过Adapter.kind明确设备类型。Transport.exchange支持“先挂读取再发包”，control=true仅用于已确认需要控制输出的PELTA。增加profile时要核对充电含义、接收器关机回复与真实型号信息，不按共享USB ID认品牌。Report长度含Windows报告号；不同命令、AULA分块地址/长度必须匹配。
 - `src/device/darmoshark.rs`：已验证 N3 的旧版 Feature 协议；原生有界传输在 `hid_io.rs`。相同品牌或类似 VID/PID 不足以复用该协议。
 - `src/device/delux.rs`：多彩Beken被动状态，先核对接收器与000A:0000集合，再按MODELS中的型号码/事件识别。共用接收器不按名称猜品牌；同协议补Model和原始样本/事件依据，其他主控新建协议。无帧不造读数，不向普通输入集合或未知Feature发命令；范围见设备支持表。
 - `src/device/discovery.rs`：公共HID候选与Windows ContainerId分组，排除适配器已认领的物理设备；新品牌不要复制公共枚举。
@@ -38,6 +39,14 @@ Registry 是集中入口。新增协议实现 `ProtocolAdapter` 的 `name`、`ow
 `discover` 和 `read` 都接收 `Cancellation`；在枚举、槽位和等待循环之间调用 `check()`。返回 `Cancelled` 时丢弃本次未完成扫描，不将半份结果合并为断开状态。单个适配器失败通过 `DiscoveryReport.failures` 独立记录，不中断其他适配器。
 
 可用的协议变化事件通过 Registry 的 change handler 送回通用读数；只能确认状态变化而需要新百分比时，使用 refresh handler 请求串行读取。不得在回调内直接操作 GUI。BAS 已实现这条路径，运行时由查询线程创建 MTA，取消和关闭句柄后才释放。标准 2A19 没有充电字段；仅实际读取成功的标准 2BED 状态允许产生 Charging / Discharging。基本BAS电量已有广播名BT5.0 KB的真实100%读数和用户反馈；零售型号未确认，变化订阅、可选2BED充电及恢复场景仍待真机验证。解析夹具与Windows API路径实现不能替代这些场景的实测，进度见[任务清单](NEXT-TASKS.md)。
+
+## 处理Issue或第三方补丁
+
+先核对附件基线和协议事实，不整包覆盖版本、注册表或现有适配器。以原始回复及更正评论为准，独立实现；保留来源链接/固定commit和贡献者证据范围，不把外部旧版读数当成本项目新版实测。不导入许可证不兼容的代码；协议事实与新实现分开。
+
+新传输先复用hid_io安全所有权；预挂读取后的发送失败也必须取消/等待读取，不能CancelIoEx后直接释放栈内OVERLAPPED或缓冲。单测至少跑完整查询、外来/迟到报文、越界、充电失败、取消、缓存及物理身份隔离，新增I/O还要用真实Windows句柄验证；命名管道不代表USB真机。
+
+没有对应硬件时可以发布已实现适配，README、Release和任务清单明确待回测。回测需新版本/哈希、精确ID、匿名适配报告、连续读数和失败恢复；无法匹配时不要盲目放宽集合或遍历未知命令。
 
 ## 接收用户的适配信息
 

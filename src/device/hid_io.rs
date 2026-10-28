@@ -18,6 +18,8 @@ use windows_sys::Win32::{
 const MAX_PENDING: usize = 8;
 const GET_FEATURE: u32 = 0x000b0192;
 const SET_FEATURE: u32 = 0x000b0191;
+// hidclass.h: HID_IN_CTL_CODE(101), METHOD_IN_DIRECT.
+const SET_OUTPUT_REPORT: u32 = 0x000b0195;
 struct OwnedHandle(HANDLE);
 // Kernel handles can be used across threads; closure is exclusively owned by this RAII value.
 unsafe impl Send for OwnedHandle {}
@@ -124,6 +126,36 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         if self.0 {
             pending().lock().unwrap_or_else(|e| e.into_inner()).reserved -= 1;
+        }
+    }
+}
+// Owns every submitted IRP on all exits, including a failed output after pre-arming
+// a read. Drop cancels and either observes completion or transfers ownership to
+// the bounded quarantine; no stack OVERLAPPED or borrowed report can escape.
+struct Flight {
+    operation: Option<Box<Operation>>,
+    reservation: Option<Reservation>,
+    _thread: PhantomData<Rc<()>>,
+}
+impl Drop for Flight {
+    fn drop(&mut self) {
+        let Some(mut op) = self.operation.take() else {
+            return;
+        };
+        if matches!(op.complete(), Ok(false)) {
+            unsafe {
+                CancelIoEx(op.device.handle.0, op.overlapped.get());
+            }
+            let grace = Instant::now() + Duration::from_millis(100);
+            while matches!(op.complete(), Ok(false)) {
+                if Instant::now() >= grace {
+                    self.reservation.take().unwrap().quarantine(op);
+                    return;
+                }
+                unsafe {
+                    WaitForSingleObject(op.event.0, 5);
+                }
+            }
         }
     }
 }
@@ -282,13 +314,13 @@ impl Session {
         self.perform(buffer, Some(GET_FEATURE), deadline, cancel)?
             .ok_or_else(|| DeviceError::Unavailable("HID get feature timed out".into()))
     }
-    fn perform(
+    fn submit(
         &self,
         buffer: Vec<u8>,
         code: Option<u32>,
         deadline: Instant,
         cancel: &Cancellation,
-    ) -> Result<Option<Vec<u8>>, DeviceError> {
+    ) -> Result<Option<Flight>, DeviceError> {
         cancel.check()?;
         if Instant::now() >= deadline {
             return Ok(None);
@@ -323,12 +355,12 @@ impl Session {
                 Some(code) => DeviceIoControl(
                     op.device.handle.0,
                     code,
-                    if code == SET_FEATURE {
+                    if code == SET_FEATURE || code == SET_OUTPUT_REPORT {
                         op.buffer.as_mut_ptr().cast()
                     } else {
                         null_mut()
                     },
-                    if code == SET_FEATURE {
+                    if code == SET_FEATURE || code == SET_OUTPUT_REPORT {
                         op.buffer.len() as u32
                     } else {
                         0
@@ -361,44 +393,34 @@ impl Session {
                 return Err(io("HID submit", error));
             }
         }
-        let outcome = loop {
-            match op.complete() {
-                Ok(true) => break Ok(true),
-                Err(e) => break Err(e),
-                Ok(false) => {}
-            }
-            if let Err(e) = cancel.check() {
-                break Err(e);
+        Ok(Some(Flight {
+            operation: Some(op),
+            reservation: Some(reservation),
+            _thread: PhantomData,
+        }))
+    }
+    fn finish(
+        mut flight: Flight,
+        code: Option<u32>,
+        deadline: Instant,
+        cancel: &Cancellation,
+    ) -> Result<Option<Vec<u8>>, DeviceError> {
+        let op = flight.operation.as_mut().unwrap();
+        loop {
+            cancel.check()?;
+            if op.complete()? {
+                break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                break Ok(false);
+                return Ok(None);
             }
             let wait = unsafe {
                 WaitForSingleObject(op.event.0, remaining.as_millis().clamp(1, 20) as u32)
             };
             if wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT {
-                break Err(io("HID wait", unsafe { GetLastError() }));
+                return Err(io("HID wait", unsafe { GetLastError() }));
             }
-        };
-        if !matches!(outcome, Ok(true)) {
-            unsafe {
-                CancelIoEx(op.device.handle.0, op.overlapped.get());
-            }
-            let grace = Instant::now() + Duration::from_millis(100);
-            loop {
-                if !matches!(op.complete(), Ok(false)) {
-                    break;
-                }
-                if Instant::now() >= grace {
-                    reservation.quarantine(op);
-                    return outcome.map(|_| None);
-                }
-                unsafe {
-                    WaitForSingleObject(op.event.0, 5);
-                }
-            }
-            return outcome.map(|_| None);
         }
         if code.is_none() || code == Some(GET_FEATURE) {
             if op.transferred as usize > op.buffer.len() {
@@ -414,6 +436,63 @@ impl Session {
         }
         cancel.check()?;
         Ok(Some(std::mem::take(&mut op.buffer)))
+    }
+    fn perform(
+        &self,
+        buffer: Vec<u8>,
+        code: Option<u32>,
+        deadline: Instant,
+        cancel: &Cancellation,
+    ) -> Result<Option<Vec<u8>>, DeviceError> {
+        match self.submit(buffer, code, deadline, cancel)? {
+            Some(flight) => Self::finish(flight, code, deadline, cancel),
+            None => Ok(None),
+        }
+    }
+    /// A pending input exists before sending. Some control-output devices lose
+    /// their fast reply if ReadFile is issued after HidD_SetOutputReport.
+    pub fn exchange(
+        &self,
+        report: &[u8],
+        length: usize,
+        control: bool,
+        deadline: Instant,
+        cancel: &Cancellation,
+    ) -> Result<Option<Vec<u8>>, DeviceError> {
+        checked_length(report.len())?;
+        self.exchange_with(length, deadline, cancel, || {
+            self.perform(
+                report.to_vec(),
+                Some(if control { SET_OUTPUT_REPORT } else { 0 }),
+                deadline,
+                cancel,
+            )?
+            .ok_or_else(|| DeviceError::Unavailable("HID output timed out".into()))?;
+            Ok(())
+        })
+    }
+    fn exchange_with(
+        &self,
+        length: usize,
+        deadline: Instant,
+        cancel: &Cancellation,
+        send: impl FnOnce() -> Result<(), DeviceError>,
+    ) -> Result<Option<Vec<u8>>, DeviceError> {
+        checked_length(length)?;
+        // Completed reads before sending contain only stale data. Bound this
+        // drain so a streaming collection cannot monopolize the worker.
+        for _ in 0..8 {
+            let Some(mut input) = self.submit(vec![0; length], None, deadline, cancel)? else {
+                return Ok(None);
+            };
+            if input.operation.as_mut().unwrap().complete()? {
+                continue;
+            }
+            cancel.check()?;
+            send()?; // input's Drop also protects every send failure/unwind.
+            return Self::finish(input, None, deadline, cancel);
+        }
+        Err(DeviceError::Unavailable("HID input queue busy".into()))
     }
 }
 
@@ -640,5 +719,198 @@ mod tests {
         let mut p = lock_pending().unwrap();
         reap(&mut p);
         assert!(!p.operations.iter().any(|op| op.device.key == name));
+    }
+    fn pipe_pair(label: &str) -> (Session, OwnedHandle) {
+        let name = format!(r"\\.\pipe\quiet-battery-{}-{}", label, std::process::id());
+        let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+        let server = OwnedHandle(unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                3 | FILE_FLAG_OVERLAPPED,
+                0,
+                1,
+                4096,
+                4096,
+                0,
+                null(),
+            )
+        });
+        assert_ne!(server.0, INVALID_HANDLE_VALUE);
+        let cancel = Cancellation::default();
+        let lease =
+            QueryGuard::acquire(&name, Instant::now() + Duration::from_secs(1), &cancel).unwrap();
+        let client = OwnedHandle(unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        });
+        assert_ne!(client.0, INVALID_HANDLE_VALUE);
+        #[allow(clippy::arc_with_non_send_sync)]
+        let device = Arc::new(Device {
+            handle: server,
+            key: name,
+            owner: std::thread::current().id(),
+            _lease: lease,
+        });
+        (Session { device }, client)
+    }
+    fn pipe_write(client: &OwnedHandle, data: &[u8]) {
+        let mut count = 0;
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    client.0,
+                    data.as_ptr(),
+                    data.len() as u32,
+                    &mut count,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(count as usize, data.len());
+    }
+    fn clean(session: &Session) {
+        let mut p = lock_pending().unwrap();
+        reap(&mut p);
+        assert!(
+            !p.operations
+                .iter()
+                .any(|op| op.device.key == session.device.key)
+        );
+        assert_eq!(p.reserved, 0);
+        assert_eq!(Arc::strong_count(&session.device), 1);
+    }
+    #[test]
+    fn prearmed_native_input_drains_stale_data_and_keeps_an_immediate_reply() {
+        let (session, client) = pipe_pair("prearmed-fast");
+        let cancel = Cancellation::default();
+        let stale = [0x88; 64];
+        let reply = [0xcc; 64];
+        pipe_write(&client, &stale);
+        let received = session
+            .exchange_with(64, Instant::now() + Duration::from_secs(1), &cancel, || {
+                // Unlike a write-then-read implementation, this read already owns
+                // its buffer/OVERLAPPED before a device can produce the reply.
+                assert_eq!(Arc::strong_count(&session.device), 2);
+                assert_eq!(lock_pending().unwrap().reserved, 1);
+                let key = session.device.key.clone();
+                std::thread::spawn(move || {
+                    assert!(
+                        QueryGuard::acquire(
+                            &key,
+                            Instant::now() + Duration::from_millis(10),
+                            &Cancellation::default()
+                        )
+                        .is_err()
+                    );
+                })
+                .join()
+                .unwrap();
+                pipe_write(&client, &reply);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, reply);
+        clean(&session);
+    }
+    #[test]
+    fn prearmed_read_is_cleaned_on_output_error_cancel_timeout_and_unwind() {
+        let (session, client) = pipe_pair("prearmed-errors");
+        let cancel = Cancellation::default();
+        for _ in 0..20 {
+            // A named pipe cannot accept HID SET_OUTPUT_REPORT. That real OS
+            // error occurs AFTER the input is pending, exercising its cleanup.
+            assert!(
+                session
+                    .exchange(
+                        &[0xcc; 64],
+                        64,
+                        true,
+                        Instant::now() + Duration::from_secs(1),
+                        &cancel
+                    )
+                    .is_err()
+            );
+            clean(&session);
+        }
+        assert!(
+            session
+                .exchange_with(
+                    64,
+                    Instant::now() + Duration::from_millis(5),
+                    &cancel,
+                    || Ok(())
+                )
+                .unwrap()
+                .is_none()
+        );
+        clean(&session);
+        let c = Cancellation::default();
+        assert!(matches!(
+            session.exchange_with(64, Instant::now() + Duration::from_secs(1), &c, || {
+                c.cancel();
+                Ok(())
+            }),
+            Err(DeviceError::Cancelled)
+        ));
+        clean(&session);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ =
+                session.exchange_with(64, Instant::now() + Duration::from_secs(1), &cancel, || {
+                    panic!("injected sender unwind")
+                });
+        }));
+        assert!(outcome.is_err());
+        clean(&session);
+        pipe_write(&client, &[7; 64]);
+        assert_eq!(
+            session
+                .input_sized(64, Instant::now() + Duration::from_secs(1), &cancel)
+                .unwrap()
+                .unwrap(),
+            [7; 64]
+        );
+        clean(&session);
+    }
+    #[test]
+    fn pending_reservations_are_bounded_and_drop_releases_them() {
+        let (session, _client) = pipe_pair("prearmed-budget");
+        let cancel = Cancellation::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut flights = Vec::new();
+        for _ in 0..MAX_PENDING {
+            flights.push(
+                session
+                    .submit(vec![0; 64], None, deadline, &cancel)
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            session.submit(vec![0; 64], None, deadline, &cancel),
+            Err(DeviceError::Unavailable(_))
+        ));
+        drop(flights);
+        clean(&session);
+        let mut called = false;
+        assert!(
+            session
+                .exchange_with(64, Instant::now(), &cancel, || {
+                    called = true;
+                    Ok(())
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert!(!called);
+        clean(&session);
     }
 }

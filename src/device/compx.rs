@@ -37,6 +37,8 @@ fn accepts(c: &Collection) -> bool {
 }
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "compx",
+    kind: super::DeviceKind::Mouse,
+    unconfirmed_name: None,
     identify,
     accepts,
     feature_only: false,

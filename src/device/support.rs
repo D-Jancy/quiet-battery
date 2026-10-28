@@ -98,7 +98,13 @@ fn matching(collections: &[Collection]) -> String {
             )
         ),
     ];
-    for adapter in [&super::compx::ADAPTER, &super::razer::ADAPTER] {
+    for adapter in [
+        &super::compx::ADAPTER,
+        &super::razer::ADAPTER,
+        &super::rog_pelta::ADAPTER,
+        &super::razer_headset::ADAPTER,
+        &super::aula::ADAPTER,
+    ] {
         let known: Vec<_> = collections
             .iter()
             .filter_map(|c| (adapter.identify)(c).map(|p| (c, p)))
@@ -352,6 +358,38 @@ mod tests {
         let matched = matching(&[c]);
         assert!(matched.contains("Profile and control collection match"));
         assert!(matching(&[]).contains("VID/PID has no built-in profile"));
+    }
+    #[test]
+    fn issue_adapters_are_reported_without_querying_any_vendor_protocol() {
+        for (adapter, vid, pid, page, usage, length, interface) in [
+            ("rog-pelta", 0x0b05, 0x1b84, 0xff00, 1, 64, 3),
+            ("razer-headset", 0x1532, 0x0555, 0xff00, 1, 64, 3),
+            ("aula", 0x0c45, 0xfefe, 0xff60, 0x61, 33, 0),
+            ("razer", 0x1532, 0x009c, 1, 2, 0, 0),
+        ] {
+            let mut c = Collection::default();
+            for (k, v) in [
+                ("vid", vid),
+                ("pid", pid),
+                ("usage_page", page),
+                ("usage", usage),
+                ("interface", interface),
+                ("input_report_bytes", length),
+                ("output_report_bytes", length),
+                ("feature_report_bytes", 91),
+            ] {
+                c.fields.insert(k, Field::number(v, "fixture"));
+            }
+            let report = matching(&[c.clone()]);
+            assert!(report.contains(&format!("\"adapter\":\"{adapter}\",\"profile_matched\":true,\"control_endpoint_matched\":true")));
+            c.fields.remove(if adapter == "razer" {
+                "feature_report_bytes"
+            } else {
+                "input_report_bytes"
+            });
+            let report = matching(&[c]);
+            assert!(report.contains(&format!("\"adapter\":\"{adapter}\",\"profile_matched\":true,\"control_endpoint_matched\":false")));
+        }
     }
     #[test]
     fn cancelled_collection_does_not_enumerate_or_touch_hardware() {

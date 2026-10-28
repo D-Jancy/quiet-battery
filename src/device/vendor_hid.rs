@@ -32,6 +32,12 @@ pub(super) fn number(c: &Collection, key: &str) -> Option<u16> {
     c.fields.get(key)?.value.as_deref()?.parse().ok()
 }
 pub(super) trait Transport {
+    fn exchange(
+        &self,
+        report: &[u8],
+        length: usize,
+        control: bool,
+    ) -> Result<Option<Vec<u8>>, DeviceError>;
     fn drain(&self, length: usize) -> Result<(), DeviceError>;
     fn output(&self, report: &[u8]) -> Result<(), DeviceError>;
     fn input(&self, length: usize) -> Result<Option<Vec<u8>>, DeviceError>;
@@ -45,6 +51,20 @@ struct Native<'a> {
     cancel: &'a Cancellation,
 }
 impl Transport for Native<'_> {
+    fn exchange(
+        &self,
+        report: &[u8],
+        length: usize,
+        control: bool,
+    ) -> Result<Option<Vec<u8>>, DeviceError> {
+        self.session.exchange(
+            report,
+            length,
+            control,
+            (Instant::now() + Duration::from_millis(500)).min(self.deadline),
+            self.cancel,
+        )
+    }
     fn drain(&self, length: usize) -> Result<(), DeviceError> {
         for _ in 0..8 {
             self.cancel.check()?;
@@ -93,6 +113,9 @@ impl Transport for Native<'_> {
 }
 pub(super) struct Adapter {
     pub name: &'static str,
+    pub kind: DeviceKind,
+    // Shared OEM IDs must not claim a retail name before the query confirms it.
+    pub unconfirmed_name: Option<&'static str>,
     pub identify: fn(&Collection) -> Option<Profile>,
     pub accepts: fn(&Collection) -> bool,
     pub feature_only: bool,
@@ -107,7 +130,7 @@ impl Adapter {
             endpoint: Some(endpoint),
             recoverable: true,
             name: p.name.into(),
-            kind: DeviceKind::Mouse,
+            kind: self.kind,
             supported: true,
             provider: self.name.into(),
         }
@@ -124,6 +147,10 @@ impl Adapter {
             Err(DeviceError::Cancelled) => return Err(DeviceError::Cancelled),
             Err(e) => {
                 descriptor.supported = false;
+                if let Some(name) = self.unconfirmed_name {
+                    descriptor.name = name.into();
+                    descriptor.kind = DeviceKind::Generic;
+                }
                 (None, Some(e))
             }
         };
@@ -260,6 +287,7 @@ pub(super) mod tests {
     use std::cell::RefCell;
     pub enum Step {
         Output(Vec<u8>),
+        Exchange(Vec<u8>, bool, Option<Vec<u8>>),
         Input(Option<Vec<u8>>),
         Set(Vec<u8>),
         Get(Vec<u8>),
@@ -283,6 +311,23 @@ pub(super) mod tests {
         }
     }
     impl Transport for Script {
+        fn exchange(
+            &self,
+            report: &[u8],
+            length: usize,
+            control: bool,
+        ) -> Result<Option<Vec<u8>>, DeviceError> {
+            match self.next() {
+                Step::Exchange(expected, mode, reply) => {
+                    assert_eq!(report, expected);
+                    assert_eq!(control, mode);
+                    assert!(reply.as_ref().is_none_or(|r| r.len() <= length));
+                    Ok(reply)
+                }
+                Step::Failure => Err(DeviceError::Io("injected exchange failure".into())),
+                _ => panic!("expected exchange"),
+            }
+        }
         fn drain(&self, length: usize) -> Result<(), DeviceError> {
             assert_eq!(length, 17);
             match self.next() {
@@ -407,10 +452,87 @@ pub(super) mod tests {
         ));
     }
     #[test]
+    fn new_headsets_and_keyboard_are_manual_and_failed_queries_keep_success_time() {
+        use super::super::{PowerState, aula, razer_headset, rog_pelta};
+        for (adapter, vid, pid, kind) in [
+            (&rog_pelta::ADAPTER, 0x0b05, 0x1b84, DeviceKind::Headset),
+            (&razer_headset::ADAPTER, 0x1532, 0x0555, DeviceKind::Headset),
+            (&aula::ADAPTER, 0x0c45, 0xfefe, DeviceKind::Keyboard),
+        ] {
+            let p = (adapter.identify)(&collection(vid, pid, "fixture")).unwrap();
+            let success = |key: &str, n| {
+                adapter
+                    .candidate(
+                        p,
+                        key,
+                        Reading::from_percent(p.name.into(), n, PowerState::Unknown(255)),
+                    )
+                    .unwrap()
+            };
+            let mut manager = crate::manager::Manager::default();
+            manager.merge(vec![success("a", 56), success("b", 80)], 100);
+            let id = manager.devices[0].descriptor.id.clone();
+            assert!(
+                manager
+                    .devices
+                    .iter()
+                    .all(|d| d.descriptor.kind == kind && !d.selected)
+            );
+            manager.devices[0].selected = true;
+            let failed = adapter
+                .candidate(p, "a", Err(DeviceError::Unavailable("asleep".into())))
+                .unwrap();
+            manager.merge(vec![failed, success("b", 79)], 200);
+            let a = manager
+                .devices
+                .iter()
+                .find(|d| d.descriptor.id == id)
+                .unwrap();
+            assert_eq!(
+                (
+                    a.reading.as_ref().unwrap().normalized_percent(),
+                    a.last_success
+                ),
+                (56, Some(100))
+            );
+            assert!(a.selected && a.connected && a.error.is_some());
+            assert_ne!(adapter.descriptor(p, "a").id, adapter.descriptor(p, "b").id);
+            manager.merge(vec![success("a", 55), success("b", 79)], 300);
+            let a = manager
+                .devices
+                .iter()
+                .find(|d| d.descriptor.id == id)
+                .unwrap();
+            assert_eq!(a.last_success, Some(300));
+            assert!(a.error.is_none());
+        }
+    }
+    #[test]
+    fn shared_sonix_ids_cannot_label_an_unconfirmed_device_as_aula() {
+        let a = &super::super::aula::ADAPTER;
+        let p = (a.identify)(&collection(0x0c45, 0xfefe, "unknown-oem")).unwrap();
+        let failed = a
+            .candidate(
+                p,
+                "unknown-oem",
+                Err(DeviceError::Unsupported("other device info".into())),
+            )
+            .unwrap();
+        assert_eq!(failed.descriptor.kind, DeviceKind::Generic);
+        assert!(!failed.descriptor.supported && failed.reading.is_none());
+        assert!(!failed.descriptor.name.contains("AULA"));
+    }
+    #[test]
     fn cancellation_precedes_inventory_or_open() {
         let cancel = Cancellation::default();
         cancel.cancel();
-        for a in [&super::super::compx::ADAPTER, &super::super::razer::ADAPTER] {
+        for a in [
+            &super::super::compx::ADAPTER,
+            &super::super::razer::ADAPTER,
+            &super::super::rog_pelta::ADAPTER,
+            &super::super::razer_headset::ADAPTER,
+            &super::super::aula::ADAPTER,
+        ] {
             assert!(matches!(a.discover(&cancel), Err(DeviceError::Cancelled)));
             assert!(matches!(
                 a.read("anything", &cancel),

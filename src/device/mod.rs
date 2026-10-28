@@ -1,4 +1,5 @@
 //! Read-only protocol adapters and common, device-independent battery values.
+mod aula;
 mod bas;
 mod compx;
 mod darmoshark;
@@ -8,6 +9,8 @@ mod discovery;
 mod hid_io;
 mod logitech;
 mod razer;
+mod razer_headset;
+mod rog_pelta;
 pub mod support;
 mod vendor_hid;
 use std::{
@@ -277,6 +280,9 @@ static ADAPTERS: &[&dyn ProtocolAdapter] = &[
     &compx::ADAPTER,
     &delux::DeluxAdapter,
     &razer::ADAPTER,
+    &rog_pelta::ADAPTER,
+    &razer_headset::ADAPTER,
+    &aula::ADAPTER,
 ];
 pub struct Registry;
 impl Registry {

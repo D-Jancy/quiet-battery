@@ -59,13 +59,19 @@ Windows 原生外设电量托盘工具。Rust + Win32，单 EXE，后台低频�
 | Logitech HID++ | 已实现1000 / 1004，新增直连FF及接收器槽位1–6；G305、GPW/GPX、G502 LIGHTSPEED、MX Master / MX Keys为首批目标，具体型号与连接仍待真机确认 |
 | ATK / VXE / VGN | 新增F1 Ultimate、A9 Ultimate、MAD R、MAD R Major Plus、R1 Pro Max、R1 SE+、F1 Pro、F2 Pro Max的明确接收器/有线ID与17字节协议；已实现、待真机确认 |
 | Razer | 新增Viper V2/V3 Pro、DeathAdder V3 Pro（含另一组ID）、Basilisk V3 Pro的明确接收器/有线ID，电量与独立充电查询；已实现、待真机确认 |
+| Razer DeathAdder V2 X HyperSpeed | v0.5.0新增1532:009C接收器，电量Feature查询；可更换电池，不查充电；已实现、待本项目真机确认 |
+| ROG PELTA | v0.5.0新增0B05:1B84的2.4G电量/充电查询；蓝牙与其他ROG型号不包含；已实现、待本项目真机确认 |
+| Razer BlackShark V2 Pro (2023) | v0.5.0新增1532:0555，电量、充电与耳机连接检查；不包含旧0528；已实现、待本项目真机确认 |
+| AULA MINI 60 HE PRO | v0.5.0新增0C45:FEFE的2.4G接收器，分块设备信息确认型号再读电量；充电含义未确认，不显示闪电；已实现、待本项目真机确认 |
 | 多彩 DELUX（Beken 状态通道） | v0.4.0新增M900 Pro、M900/M900 Mini、M800 Mini、M600 Pro/8K、M500 Pro、M700 Pro、M300 Pro及部分M800 Pro变体；仅表中1D57:FA60/FA65接收器和17组帧标识，已实现、待真机确认 |
 | 标准蓝牙 BAS：180F / 2A19 | 曾真实取得广播名BT5.0 KB的100%；零售型号、订阅与充电场景未确认 |
 | 其他设备 | 需要核对共用协议或新增适配器；枚举到设备不等于能读电量 |
 
-**新增型号已内置读取，可以直接运行尝试；多彩及此前新增型号仍待对应实体硬件确认。** 协议报文、模拟完整事务、边界和错误处理已有测试，不能代替各型号真机验证。精确VID/PID、控制集合、来源及验证层次见[设备支持表](docs/DEVICE-SUPPORT.md)，当前结果见[验证记录](docs/VALIDATION.md)。同品牌、相近名称或不同倍率接收器不能自动视为兼容。
+**新增型号已内置读取，可以直接运行尝试；上述新增型号仍待对应实体硬件确认。** 协议报文、模拟完整事务、边界和错误处理已有测试，不能代替各型号真机验证。精确VID/PID、控制集合、来源及验证层次见[设备支持表](docs/DEVICE-SUPPORT.md)，当前结果见[验证记录](docs/VALIDATION.md)。同品牌、相近名称或不同倍率接收器不能自动视为兼容。
 
 罗技动态识别实际名称、类型、身份和电量功能，没有写死G304；Compx/Razer按有依据的设备和控制集合配置匹配；多彩还须从专用状态帧确认型号，不把共享接收器ID当品牌。缓存区分物理容器与逻辑端点，不按型号名合并。同接收器重配、直连/接收器双路径等身份限制见[设备支持表](docs/DEVICE-SUPPORT.md)。16类图标不代表16类协议已适配。
+
+v0.5.0处理[Issue #1](https://github.com/TheWebDog/quiet-battery/issues/1)及[Issue #2](https://github.com/TheWebDog/quiet-battery/issues/2)的适配资料。贡献者报告了上述四款的真实读数，本机没有这四款硬件；我们核对资料、独立实现并通过事务与Windows原生I/O测试，不将贡献者的旧版运行结果写成新版真机认证。耳机、键盘请在“添加设备”手动加入；鼠标成功识别后默认监控。若未识别，请提供新版本的复制信息/导出文件和连接方式。
 
 ### 测试多彩 M900 Pro
 
@@ -94,4 +100,4 @@ Windows 原生外设电量托盘工具。Rust + Win32，单 EXE，后台低频�
 
 源码公开，采用 [PolyForm Noncommercial 1.0.0](LICENSE)。许可范围内可非商业使用、修改和分发；未获该许可允许的商业用途须取得[单独授权](COMMERCIAL.md)。这属于非商业源码许可，并非 OSI 定义的开源许可。依赖保留各自的[第三方许可](THIRD_PARTY_NOTICES.txt)，EXE 内也包含许可，可用 `--licenses` 导出。
 
-灵感来自 [2.4G-battery-viewer](https://github.com/yszyszysz233/2.4G-battery-viewer)。当前使用Rust独立实现HID++、BAS及已核对的Compx/Razer电量协议，协议与型号来源见[设备支持表](docs/DEVICE-SUPPORT.md)。其他项目的支持列表不自动成为本项目的真机验证结论。
+灵感来自 [2.4G-battery-viewer](https://github.com/yszyszysz233/2.4G-battery-viewer)。当前使用Rust独立实现HID++、BAS及已核对的厂商电量协议，协议与型号来源见[设备支持表](docs/DEVICE-SUPPORT.md)。其他项目的支持列表不自动成为本项目的真机验证结论。
