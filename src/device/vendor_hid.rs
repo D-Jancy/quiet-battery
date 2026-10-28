@@ -360,13 +360,17 @@ pub(super) mod tests {
                     assert_eq!(report, expected);
                     Ok(())
                 }
+                Step::Failure => Err(DeviceError::Io("injected feature failure".into())),
                 _ => panic!("expected set feature"),
             }
         }
         fn get_feature(&self, id: u8, length: usize) -> Result<Vec<u8>, DeviceError> {
-            assert_eq!((id, length), (0, 91));
+            assert!(length > 0 && length <= 4096 && id < 255);
             match self.next() {
-                Step::Get(value) => Ok(value),
+                Step::Get(value) => {
+                    assert!(value.len() <= length);
+                    Ok(value)
+                }
                 Step::Failure => Err(DeviceError::Io("injected feature failure".into())),
                 _ => panic!("expected get feature"),
             }
@@ -532,6 +536,8 @@ pub(super) mod tests {
             &super::super::rog_pelta::ADAPTER,
             &super::super::razer_headset::ADAPTER,
             &super::super::aula::ADAPTER,
+            &super::super::ajazz::ADAPTER,
+            &super::super::xiaomi::ADAPTER,
         ] {
             assert!(matches!(a.discover(&cancel), Err(DeviceError::Cancelled)));
             assert!(matches!(
