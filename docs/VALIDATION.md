@@ -14,6 +14,8 @@
 - 四款新适配等待对应实体硬件回测：精确ID/固件、首次发现、百分比变化、充电、关机/休眠恢复、拔插和厂商软件并发。AULA充电字段含义、完整分块头及接收器关机缓存行为仍待确认；1B86经典蓝牙、BlackShark旧0528和AULA有线未接入。任务、来源和回测方法已更新。
 - 成品1,633,280字节，CLI版本0.5.0，SHA256=`6cdf45a495f96627fe7f1450e5ab4ec9bada37b29f3bed00ac4552833fec548c`。原始Issue附件、研究资料、运行身份及状态只留本地忽略目录。
 
+- 已通过GitHub CLI发布正式[v0.5.0](https://github.com/TheWebDog/quiet-battery/releases/tag/v0.5.0)，latest且非预发布。下载核对EXE、SHA256SUMS、LICENSES三份附件均与本地一致，CLI与Windows文件/产品资源均0.5.0；源码标签对应77cbf24。既有六个Release及附件全部保留。Issue #1/#2的适配实现已关闭，新型号硬件回测仍在任务清单中保留。
+
 ## v0.4.0：多彩Beken状态通道
 
 2026-10-23，Windows10 x64。本机只有可用G304等既有设备，没有连接多彩；M900 Pro及其他新增多彩型号均为已实现、待真机确认。
