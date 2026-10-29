@@ -19,6 +19,7 @@ fn identify(c: &Collection) -> Option<Profile> {
 }
 fn accepts(c: &Collection) -> bool {
     [
+        ("interface", 2),
         ("usage_page", 0xff80),
         ("usage", 1),
         ("input_report_bytes", 33),
@@ -49,13 +50,13 @@ fn request(address: u8, last: bool) -> [u8; 33] {
     b
 }
 fn chunk(b: &[u8], address: u8) -> Option<&[u8]> {
-    if b.len() != 33 || b[1] != 0x55 || b[2] != COMMAND {
+    if b.len() != 33 || b[..4] != [0, 0x55, COMMAND, CHUNK as u8] {
         return None;
     }
-    // The vendor client ignores the echoed address. Require it when present,
-    // so a late reply from another chunk cannot be stitched into this one.
+    // Zero is the first block's address, not an absent-address sentinel.
+    // Fail closed rather than stitch a stale first block into the second one.
     let echoed = u16::from(b[4]) | u16::from(b[5]) << 8;
-    if echoed != 0 && echoed != u16::from(address) {
+    if echoed != u16::from(address) {
         return None;
     }
     b.get(9..9 + CHUNK)
@@ -66,9 +67,9 @@ fn decode(info: &[u8; LENGTH]) -> Result<(u8, PowerState), DeviceError> {
     // The receiver is shared; only the documented AK820 MAX model identity and
     // 2.4G work mode may claim this name and value.
     if vid != 0x0c45 || pid != 0x80a0 || info[16] != 2 {
-        return Err(DeviceError::Unsupported(
-            "AJAZZ接收器未确认目标键盘与2.4G路由".into(),
-        ));
+        // A valid device-info response positively identifies another device or
+        // route. Unlike a timeout, that is evidence this logical target is gone.
+        return Err(DeviceError::NotFound);
     }
     if info[17] > 100 {
         return Err(DeviceError::Protocol("AJAZZ电量越界".into()));
@@ -136,6 +137,7 @@ mod tests {
         assert!(identify(&c).is_some());
         assert!(!accepts(&c));
         for (k, v) in [
+            ("interface", 2),
             ("usage_page", 0xff80),
             ("usage", 1),
             ("input_report_bytes", 33),
@@ -145,6 +147,7 @@ mod tests {
         }
         assert!(accepts(&c));
         for (k, v) in [
+            ("interface", 3),
             ("usage_page", 0xff60),
             ("usage", 2),
             ("input_report_bytes", 32),
@@ -169,11 +172,14 @@ mod tests {
         );
         assert_eq!(&request(0, false)[..8], &[0, 0xaa, 0x10, 24, 0, 0, 0, 0]);
         assert_eq!(&request(24, true)[..8], &[0, 0xaa, 0x10, 24, 24, 0, 0, 1]);
-        for (index, value) in [(4, 0x46), (6, 0), (16, 0), (17, 101)] {
+        for (index, value) in [(4, 0x46), (6, 0), (16, 0)] {
             let mut bad = info;
             bad[index] = value;
-            assert!(decode(&bad).is_err());
+            assert!(matches!(decode(&bad), Err(DeviceError::NotFound)));
         }
+        let mut bad = info;
+        bad[17] = 101;
+        assert!(matches!(decode(&bad), Err(DeviceError::Protocol(_))));
         for percent in [0, 100] {
             let mut b = info;
             b[17] = percent;
@@ -184,7 +190,7 @@ mod tests {
     #[test]
     fn short_wrong_header_and_silence_never_update_percent() {
         let good = response(&sample(), 0);
-        for index in [1, 2] {
+        for index in [0, 1, 2, 3] {
             let mut b = good.clone();
             b[index] ^= 1;
             assert!(chunk(&b, 0).is_none());
@@ -205,6 +211,35 @@ mod tests {
         c.cancel();
         let io = Script::new(vec![]);
         assert!(matches!(query(p(), &io, &c), Err(DeviceError::Cancelled)));
+        io.done();
+    }
+    #[test]
+    fn zero_address_is_not_a_wildcard_for_the_second_block() {
+        let info = sample();
+        let first = response(&info, 0);
+        assert!(chunk(&first, 24).is_none());
+        let io = Script::new(vec![
+            step(&info, 0),
+            Step::Exchange(request(24, true).to_vec(), false, Some(first.clone())),
+            Step::Exchange(request(24, true).to_vec(), false, Some(first)),
+        ]);
+        assert!(matches!(
+            query(p(), &io, &Cancellation::default()),
+            Err(DeviceError::Unavailable(_))
+        ));
+        io.done();
+    }
+    #[test]
+    fn declared_short_payload_cannot_turn_padding_into_zero_percent() {
+        let info = sample();
+        let mut short = response(&info, 0);
+        short[3] = 17;
+        short[26] = 0;
+        let io = Script::new(vec![
+            Step::Exchange(request(0, false).to_vec(), false, Some(short.clone())),
+            Step::Exchange(request(0, false).to_vec(), false, Some(short)),
+        ]);
+        assert!(query(p(), &io, &Cancellation::default()).is_err());
         io.done();
     }
 }

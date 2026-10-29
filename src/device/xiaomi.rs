@@ -21,6 +21,7 @@ fn identify(c: &Collection) -> Option<Profile> {
 }
 fn accepts(c: &Collection) -> bool {
     [
+        ("interface", 3),
         ("usage_page", 0xffef),
         ("usage", 0),
         ("input_report_bytes", 64),
@@ -57,12 +58,17 @@ fn decode(reply: &[u8]) -> Result<(u8, PowerState), DeviceError> {
     if reply[..3] != [REPORT_ID, SELECTOR, QUERY] {
         return Err(DeviceError::Protocol("小米电量回复标识不匹配".into()));
     }
+    // The three-byte battery payload starts at byte 4. An echoed request has
+    // this length byte zero; it must never become a successful 0% observation.
+    if reply[3] != 3 {
+        return Err(DeviceError::Protocol("小米电量回复数据长度异常".into()));
+    }
     let percent = reply[5];
     if percent > 100 {
         return Err(DeviceError::Protocol("小米电量越界".into()));
     }
-    // The queried frame's status byte has no confirmed charging meaning.
-    Ok((percent, PowerState::Unknown(reply[3])))
+    // No byte in this payload has a confirmed charging interpretation yet.
+    Ok((percent, PowerState::Unknown(255)))
 }
 fn query(p: Profile, io: &dyn Transport, cancel: &Cancellation) -> Result<Reading, DeviceError> {
     cancel.check()?;
@@ -89,6 +95,7 @@ mod tests {
         b[1] = SELECTOR;
         b[2] = QUERY;
         b[3] = 3;
+        b[4] = 1;
         b[5] = 56;
         b
     }
@@ -98,6 +105,7 @@ mod tests {
         assert!(identify(&c).is_some());
         assert!(!accepts(&c));
         for (k, v) in [
+            ("interface", 3),
             ("usage_page", 0xffef),
             ("usage", 0),
             ("input_report_bytes", 64),
@@ -107,7 +115,14 @@ mod tests {
             c.fields.insert(k, Field::number(v, "fixture"));
         }
         assert!(accepts(&c));
-        for (k, v) in [("usage_page", 0xff60), ("usage", 1)] {
+        for (k, v) in [
+            ("interface", 2),
+            ("usage_page", 0xff60),
+            ("usage", 1),
+            ("feature_report_bytes", 63),
+            ("input_report_bytes", 63),
+            ("output_report_bytes", 63),
+        ] {
             let mut other = c.clone();
             other.fields.insert(k, Field::number(v, "fixture"));
             assert!(!accepts(&other));
@@ -121,13 +136,13 @@ mod tests {
         let io = Script::new(vec![
             Step::Set(request().to_vec()),
             Step::Pause,
-            Step::Get(reply.clone()),
+            Step::Get(5, 64, reply.clone()),
         ]);
         let value = query(p(), &io, &Cancellation::default()).unwrap();
         io.done();
         assert_eq!(
             (value.normalized_percent(), value.power_state),
-            (56, PowerState::Unknown(3))
+            (56, PowerState::Unknown(255))
         );
         for index in [0, 1, 2] {
             let mut bad = sample();
@@ -161,5 +176,24 @@ mod tests {
             reply[5] = percent;
             assert_eq!(decode(&reply).unwrap().0, percent);
         }
+    }
+    #[test]
+    fn request_echo_and_empty_payload_never_replace_battery_with_zero() {
+        assert!(decode(&request()).is_err());
+        for length in [0, 1, 2, 4, 255] {
+            let mut b = sample();
+            b[3] = length;
+            assert!(decode(&b).is_err());
+        }
+        let mut zero = sample();
+        zero[5] = 0;
+        assert_eq!(decode(&zero).unwrap().0, 0);
+        let io = Script::new(vec![
+            Step::Set(request().to_vec()),
+            Step::Pause,
+            Step::Get(5, 64, request().to_vec()),
+        ]);
+        assert!(query(p(), &io, &Cancellation::default()).is_err());
+        io.done();
     }
 }
