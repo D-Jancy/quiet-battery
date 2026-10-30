@@ -196,4 +196,21 @@ mod tests {
         assert!(query(p(), &io, &Cancellation::default()).is_err());
         io.done();
     }
+    // Contributor Mi Gaming Mouse 2 receiver capture, 2026-10-30. One valid
+    // feature reply with a 3-byte payload; no path, container or serial data.
+    const CAPTURED_REPLY: [u8; 64] = [
+        0x05, 0x01, 0x16, 0x03, 0x01, 0x14, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    #[test]
+    fn captured_feature_reply_confirms_length_and_percent() {
+        assert_eq!(CAPTURED_REPLY[..4], [REPORT_ID, SELECTOR, QUERY, 3]);
+        assert_eq!(
+            decode(&CAPTURED_REPLY).unwrap(),
+            (20, PowerState::Unknown(255))
+        );
+        // A real request echo (length byte 0) must never become 0%.
+        assert!(decode(&request()).is_err());
+    }
 }

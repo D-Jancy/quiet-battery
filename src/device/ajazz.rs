@@ -242,4 +242,30 @@ mod tests {
         assert!(query(p(), &io, &Cancellation::default()).is_err());
         io.done();
     }
+    // Contributor AK820 MAX receiver capture, 2026-10-30. Headers and fields
+    // only; no path, container or serial data. First and second block verbatim.
+    const CAPTURED_FIRST: [u8; 33] = [
+        0, 0x55, 0x10, 0x18, 0, 0, 0, 0, 0, 0, 0, 0, 0x92, 0x45, 0x0c, 0xa0, 0x80, 0x31, 0x01, 0,
+        0, 0x66, 0x01, 0x04, 0x10, 0x02, 0x50, 0, 0, 0x04, 0, 0, 0,
+    ];
+    const CAPTURED_SECOND: [u8; 33] = [
+        0, 0x55, 0x10, 0x18, 0x18, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04,
+        0x10, 0x02, 0x50, 0, 0, 0, 0, 0, 0,
+    ];
+    #[test]
+    fn captured_receiver_blocks_confirm_headers_addresses_and_percent() {
+        assert_eq!(CAPTURED_FIRST[..4], [0, 0x55, 0x10, 0x18]);
+        assert_eq!(CAPTURED_SECOND[..4], [0, 0x55, 0x10, 0x18]);
+        // The real second block echoes address 24 and sets the last-block flag.
+        assert_eq!(
+            (CAPTURED_SECOND[4], CAPTURED_SECOND[5], CAPTURED_SECOND[7]),
+            (24, 0, 1)
+        );
+        let mut info = [0; LENGTH];
+        info[..CHUNK].copy_from_slice(chunk(&CAPTURED_FIRST, 0).unwrap());
+        info[CHUNK..].copy_from_slice(chunk(&CAPTURED_SECOND, 24).unwrap());
+        assert!(chunk(&CAPTURED_FIRST, 24).is_none());
+        assert!(chunk(&CAPTURED_SECOND, 0).is_none());
+        assert_eq!(decode(&info).unwrap(), (80, PowerState::Unknown(0)));
+    }
 }
